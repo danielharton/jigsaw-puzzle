@@ -19,7 +19,7 @@ async function initPuzzle() {
         return;
     }
 
-    const { statusNode, previewCanvas, previewCtx } = injectHelperPanel();
+    const { statusNode, previewCanvas, previewCtx, audioToggle } = injectHelperPanel();
     setStatus('Loading image.png...');
 
     try {
@@ -40,8 +40,12 @@ async function initPuzzle() {
             boardSize,
             pieceSize,
             trayPieceSize,
-            statusNode
+            statusNode,
+            audioToggle,
+            audio: null
         };
+
+        setupAudio();
 
         const sceneCanvas = projectImageToCanvas(sourceImage, BOARD_DIMENSION);
         previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
@@ -65,10 +69,12 @@ function injectHelperPanel() {
     const existingPanel = document.getElementById('puzzle-helper-panel');
     if (existingPanel) {
         const canvas = existingPanel.querySelector('canvas');
+        const audioToggle = existingPanel.querySelector('[data-role="audio-toggle"]');
         return {
             statusNode: existingPanel.querySelector('[data-role="status"]'),
             previewCanvas: canvas,
-            previewCtx: canvas.getContext('2d')
+            previewCtx: canvas.getContext('2d'),
+            audioToggle
         };
     }
 
@@ -108,6 +114,33 @@ function injectHelperPanel() {
     statusNode.dataset.role = 'status';
     helperPanel.appendChild(statusNode);
 
+    const controlsRow = document.createElement('div');
+    controlsRow.style.display = 'flex';
+    controlsRow.style.gap = '8px';
+    controlsRow.style.justifyContent = 'center';
+    controlsRow.style.width = '100%';
+
+    const audioToggle = document.createElement('button');
+    audioToggle.type = 'button';
+    audioToggle.dataset.role = 'audio-toggle';
+    audioToggle.textContent = 'Enable sound';
+    audioToggle.style.padding = '6px 10px';
+    audioToggle.style.border = '1px solid #444';
+    audioToggle.style.background = '#2b2b2b';
+    audioToggle.style.color = '#e7e7e7';
+    audioToggle.style.cursor = 'pointer';
+    audioToggle.style.borderRadius = '4px';
+    audioToggle.style.fontSize = '0.85rem';
+    audioToggle.addEventListener('mouseenter', () => {
+        audioToggle.style.background = '#3a3a3a';
+    });
+    audioToggle.addEventListener('mouseleave', () => {
+        audioToggle.style.background = '#2b2b2b';
+    });
+
+    controlsRow.appendChild(audioToggle);
+    helperPanel.appendChild(controlsRow);
+
     if (container) {
         container.appendChild(helperPanel);
     } else {
@@ -117,7 +150,8 @@ function injectHelperPanel() {
     return {
         statusNode,
         previewCanvas,
-        previewCtx: previewCanvas.getContext('2d')
+        previewCtx: previewCanvas.getContext('2d'),
+        audioToggle
     };
 }
 
@@ -287,6 +321,7 @@ function handleDropOnSlot(event) {
     placePieceInSlot(piece, slot);
     slot.classList.remove('drag-over');
     setStatus('Piece placed on the board.');
+    puzzleState.audio?.playPlace?.();
     checkCompletion();
 }
 
@@ -299,6 +334,7 @@ function handleDropOnTray(event) {
     }
     movePieceToTray(piece);
     setStatus('Piece returned to the tray.');
+    puzzleState.audio?.playReturn?.();
     checkCompletion();
 }
 
@@ -371,6 +407,7 @@ function shufflePieces() {
     });
 
     setStatus('Pieces shuffled. Start solving!');
+    puzzleState.audio?.playShuffle?.();
 }
 
 function checkCompletion() {
@@ -386,6 +423,7 @@ function checkCompletion() {
 
     if (allCorrect && allFilled) {
         setStatus('Puzzle completed! Great work!');
+        puzzleState.audio?.playComplete?.();
     } else if (allFilled) {
         setStatus('So close! Some pieces need to be swapped.');
     }
@@ -395,6 +433,128 @@ function setStatus(message) {
     if (puzzleState?.statusNode) {
         puzzleState.statusNode.textContent = message;
     }
+}
+
+function setupAudio() {
+    if (!puzzleState || puzzleState.audio) {
+        return;
+    }
+
+    const engine = createAudioEngine();
+    if (!engine) {
+        if (puzzleState.audioToggle) {
+            puzzleState.audioToggle.textContent = 'Audio not supported';
+            puzzleState.audioToggle.disabled = true;
+            puzzleState.audioToggle.style.opacity = '0.5';
+            puzzleState.audioToggle.style.cursor = 'not-allowed';
+        }
+        return;
+    }
+
+    puzzleState.audio = engine;
+
+    const syncLabel = () => {
+        if (!puzzleState?.audioToggle) {
+            return;
+        }
+        puzzleState.audioToggle.textContent = engine.isMuted ? 'Enable sound' : 'Mute sound';
+    };
+
+    if (puzzleState.audioToggle) {
+        puzzleState.audioToggle.addEventListener('click', () => {
+            engine.toggleMute();
+            syncLabel();
+        });
+    }
+
+    syncLabel();
+}
+
+function createAudioEngine() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) {
+        return null;
+    }
+
+    const context = new AudioCtx();
+    const masterGain = context.createGain();
+    const baseGain = 0.25;
+    masterGain.gain.value = baseGain;
+    masterGain.connect(context.destination);
+
+    let isMuted = false;
+
+    const ensureContext = () => {
+        if (context.state === 'suspended') {
+            return context.resume().catch(() => {});
+        }
+        return Promise.resolve();
+    };
+
+    const playPulse = (frequency, startTime, duration, type = 'sine') => {
+        const osc = context.createOscillator();
+        const gain = context.createGain();
+        osc.type = type;
+        osc.frequency.value = frequency;
+
+        const attack = 0.01;
+        const decay = duration - attack;
+
+        gain.gain.setValueAtTime(0.0001, startTime);
+        gain.gain.exponentialRampToValueAtTime(1, startTime + attack);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startTime + attack + decay);
+
+        osc.connect(gain).connect(masterGain);
+        osc.start(startTime);
+        osc.stop(startTime + duration + 0.05);
+    };
+
+    const playSequence = steps => {
+        if (isMuted) {
+            return;
+        }
+        ensureContext();
+        const now = context.currentTime;
+        steps.forEach(step => {
+            const { freq, delay = 0, duration = 0.18, type = 'sine' } = step;
+            playPulse(freq, now + delay, duration, type);
+        });
+    };
+
+    return {
+        get isMuted() {
+            return isMuted;
+        },
+        toggleMute() {
+            isMuted = !isMuted;
+            masterGain.gain.value = isMuted ? 0 : baseGain;
+        },
+        playPlace() {
+            playSequence([
+                { freq: 420, duration: 0.12, type: 'triangle' },
+                { freq: 620, delay: 0.08, duration: 0.1, type: 'triangle' }
+            ]);
+        },
+        playReturn() {
+            playSequence([
+                { freq: 260, duration: 0.12, type: 'sawtooth' }
+            ]);
+        },
+        playShuffle() {
+            playSequence([
+                { freq: 160, duration: 0.08, type: 'square' },
+                { freq: 220, delay: 0.05, duration: 0.08, type: 'square' },
+                { freq: 280, delay: 0.1, duration: 0.08, type: 'square' }
+            ]);
+        },
+        playComplete() {
+            playSequence([
+                { freq: 520, duration: 0.12, type: 'sine' },
+                { freq: 660, delay: 0.08, duration: 0.14, type: 'sine' },
+                { freq: 880, delay: 0.18, duration: 0.18, type: 'triangle' }
+            ]);
+        }
+    };
 }
 
 function clamp(value, min, max) {
